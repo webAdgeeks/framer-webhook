@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(where npm:*)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/nodejs:/c/Users/G3ORG/AppData/Roaming/npm\")",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Bash(cmd.exe /c \"npm install\")",
+      "Bash(cmd.exe /c \"npm install 2>&1\")",
+      "Bash(cmd.exe /c \"cd /d \"\"C:\\\\Users\\\\G3ORG\\\\Downloads\\\\Framer Ecommerce\"\" && npm install\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\G3ORG\\\\Downloads\\\\\"Framer Ecommerce\\\\\" & npm install 2>&1 & echo EXIT_CODE=%ERRORLEVEL%\")",
+      "Bash(powershell.exe -Command \"Set-Location ''C:\\\\Users\\\\G3ORG\\\\Downloads\\\\Framer Ecommerce''; npm install 2>&1 | Out-String\")",
+      "Bash(export PATH=\"/c/Users/G3ORG/Downloads/node-v24.15.0-win-x64/node-v24.15.0-win-x64:$PATH\")",
+      "Bash(npm --version)",
+      "Bash(node server.js)",
+      "Bash(curl -s -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d '{\"name\":\"John Doe\",\"email\":\"john@example.com\",\"message\":\"Hello from Framer!\"}')",
+      "Bash(curl -s http://localhost:3000/api/submissions)"
+    ]
+  }
+}
