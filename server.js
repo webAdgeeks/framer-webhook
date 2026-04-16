@@ -44,6 +44,8 @@ if (R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_ACCOUNT_ID) {
       accessKeyId: R2_ACCESS_KEY_ID,
       secretAccessKey: R2_SECRET_ACCESS_KEY,
     },
+    forcePathStyle: true,
+    tls: true,
   });
   console.log("[r2] Cloudflare R2 configured for file uploads");
 } else {
@@ -201,23 +203,26 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
 
     const fields = req.body && typeof req.body === "object" ? req.body : {};
 
-    // Handle file uploads
+    // Handle file uploads — never let file upload failure break the submission
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
         const filename = `${Date.now()}-${safeName}`;
-        let fileUrl;
+        let fileUrl = null;
 
-        if (s3) {
-          // Upload to Cloudflare R2
-          const key = await uploadToR2(id, filename, file.buffer, file.mimetype);
-          fileUrl = `/api/files/${key}`;
-        } else {
-          // Fallback: save locally
-          const subDir = path.join(UPLOADS_DIR, id);
-          if (!fs.existsSync(subDir)) fs.mkdirSync(subDir, { recursive: true });
-          fs.writeFileSync(path.join(subDir, filename), file.buffer);
-          fileUrl = `/uploads/${id}/${filename}`;
+        try {
+          if (s3) {
+            const key = await uploadToR2(id, filename, file.buffer, file.mimetype);
+            fileUrl = `/api/files/${key}`;
+          } else {
+            const subDir = path.join(UPLOADS_DIR, id);
+            if (!fs.existsSync(subDir)) fs.mkdirSync(subDir, { recursive: true });
+            fs.writeFileSync(path.join(subDir, filename), file.buffer);
+            fileUrl = `/uploads/${id}/${filename}`;
+          }
+        } catch (uploadErr) {
+          console.error(`[webhook] File upload failed for ${file.originalname}:`, uploadErr.message);
+          fileUrl = null; // Mark as failed but continue
         }
 
         const fileEntry = {
@@ -225,7 +230,7 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
           originalName: file.originalname,
           mimeType: file.mimetype,
           size: file.size,
-          url: fileUrl,
+          url: fileUrl || "(upload failed)",
         };
 
         const key = `__file_${file.fieldname || "file"}`;
@@ -236,7 +241,7 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
           fields[key] = fileEntry;
         }
       }
-      console.log(`[webhook] ${req.files.length} file(s) uploaded ${s3 ? "to R2" : "locally"}`);
+      console.log(`[webhook] ${req.files.length} file(s) processed ${s3 ? "(R2)" : "(local)"}`);
     }
 
     db.run(
