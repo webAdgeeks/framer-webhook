@@ -27,9 +27,11 @@ const DB_PATH = path.join(__dirname, "submissions.db");
 // Enable CORS for all origins (Framer sites can POST from any domain)
 app.use(cors());
 
-// Parse JSON and URL-encoded bodies (Framer sends both formats)
+// Parse JSON and URL-encoded bodies (Framer may send various formats)
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(express.text({ limit: "1mb", type: "text/*" }));
+app.use(express.raw({ limit: "1mb", type: "application/octet-stream" }));
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, "public")));
@@ -92,11 +94,29 @@ function authenticateWebhook(req, res, next) {
 // Routes
 // ---------------------------------------------------------------------------
 
+// Middleware: try parsing multipart/form-data, but don't fail on other types
+function parseMultipart(req, res, next) {
+  const contentType = req.headers["content-type"] || "";
+  if (contentType.includes("multipart/form-data")) {
+    upload.none()(req, res, (err) => {
+      if (err) {
+        console.error("[webhook] Multer error:", err.message);
+      }
+      next();
+    });
+  } else {
+    next();
+  }
+}
+
 // POST /webhook — Receive and store a form submission
-// upload.none() parses multipart/form-data (text fields only, no file uploads)
-// This is needed because Framer sends forms as multipart/form-data
-app.post("/webhook", upload.none(), authenticateWebhook, (req, res) => {
+// Handles JSON, URL-encoded, AND multipart/form-data (Framer uses this one)
+app.post("/webhook", parseMultipart, authenticateWebhook, (req, res) => {
   try {
+    // Log what we received for debugging
+    console.log(`[webhook] Content-Type: ${req.headers["content-type"]}`);
+    console.log(`[webhook] Body:`, req.body);
+
     const id = uuidv4();
     const received_at = new Date().toISOString();
 
