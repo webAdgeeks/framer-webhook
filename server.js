@@ -95,10 +95,11 @@ function authenticateWebhook(req, res, next) {
 // ---------------------------------------------------------------------------
 
 // Middleware: try parsing multipart/form-data, but don't fail on other types
+// Uses upload.any() because Framer forms may include file fields
 function parseMultipart(req, res, next) {
   const contentType = req.headers["content-type"] || "";
   if (contentType.includes("multipart/form-data")) {
-    upload.none()(req, res, (err) => {
+    upload.any()(req, res, (err) => {
       if (err) {
         console.error("[webhook] Multer error:", err.message);
       }
