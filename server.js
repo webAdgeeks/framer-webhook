@@ -6,10 +6,14 @@
 
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
 const initSqlJs = require("sql.js");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const fs = require("fs");
+
+// Multer setup — parses multipart/form-data (how Framer sends form submissions)
+const upload = multer();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -89,7 +93,9 @@ function authenticateWebhook(req, res, next) {
 // ---------------------------------------------------------------------------
 
 // POST /webhook — Receive and store a form submission
-app.post("/webhook", authenticateWebhook, (req, res) => {
+// upload.none() parses multipart/form-data (text fields only, no file uploads)
+// This is needed because Framer sends forms as multipart/form-data
+app.post("/webhook", upload.none(), authenticateWebhook, (req, res) => {
   try {
     const id = uuidv4();
     const received_at = new Date().toISOString();
