@@ -403,6 +403,32 @@
       white-space: pre-wrap;
     }
 
+    .file-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--accent-light);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+
+    .file-link:hover {
+      border-color: var(--blue);
+      background: #eff6ff;
+    }
+
+    .file-meta {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-left: 4px;
+    }
+
     /* Empty state */
     .empty-state {
       display: flex;
@@ -775,8 +801,8 @@
         <div class="detail-fields">
           ${entries.map(([key, val]) => `
             <div class="field-row">
-              <div class="field-name">${escapeHtml(key)}</div>
-              <div class="field-value">${escapeHtml(typeof val === "object" ? JSON.stringify(val, null, 2) : String(val))}</div>
+              <div class="field-name">${escapeHtml(key.replace(/^__file_/, '📎 '))}</div>
+              <div class="field-value">${renderFieldValue(key, val)}</div>
             </div>
           `).join("")}
         </div>
@@ -857,6 +883,29 @@
     const d = new Date(iso);
     const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
     return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} at ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`;
+  }
+
+  function renderFieldValue(key, val) {
+    // Render uploaded file fields as download links
+    if (key.startsWith("__file_") && val && typeof val === "object") {
+      const files = Array.isArray(val) ? val : [val];
+      return files.map(f => {
+        const size = f.size ? formatFileSize(f.size) : "";
+        return `<a class="file-link" href="${f.url}" target="_blank" download>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          ${escapeHtml(f.originalName || "file")}
+          <span class="file-meta">${size}</span>
+        </a>`;
+      }).join(" ");
+    }
+    // Regular field
+    return escapeHtml(typeof val === "object" ? JSON.stringify(val, null, 2) : String(val));
+  }
+
+  function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   }
 
   function escapeHtml(str) {

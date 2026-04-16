@@ -12,8 +12,33 @@ const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const fs = require("fs");
 
-// Multer setup — parses multipart/form-data (how Framer sends form submissions)
-const upload = multer();
+// Uploads directory — where files from Framer forms are stored
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Multer setup — store files to disk with unique names
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    // Create a subdirectory per submission (set in parseMultipart before multer runs)
+    const subDir = path.join(UPLOADS_DIR, req._submissionId || "unknown");
+    if (!fs.existsSync(subDir)) {
+      fs.mkdirSync(subDir, { recursive: true });
+    }
+    cb(null, subDir);
+  },
+  filename: (req, file, cb) => {
+    // Keep original filename but prefix with timestamp to avoid collisions
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    cb(null, `${Date.now()}-${safeName}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB per file
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,6 +60,9 @@ app.use(express.raw({ limit: "1mb", type: "application/octet-stream" }));
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, "public")));
+
+// Serve uploaded files at /uploads/<submissionId>/<filename>
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ---------------------------------------------------------------------------
 // Database Setup (sql.js — pure JS SQLite, no native compilation needed)
@@ -99,6 +127,8 @@ function authenticateWebhook(req, res, next) {
 function parseMultipart(req, res, next) {
   const contentType = req.headers["content-type"] || "";
   if (contentType.includes("multipart/form-data")) {
+    // Generate submission ID early so multer can use it for the folder name
+    req._submissionId = uuidv4();
     upload.any()(req, res, (err) => {
       if (err) {
         console.error("[webhook] Multer error:", err.message);
@@ -117,8 +147,10 @@ app.post("/webhook", parseMultipart, authenticateWebhook, (req, res) => {
     // Log what we received for debugging
     console.log(`[webhook] Content-Type: ${req.headers["content-type"]}`);
     console.log(`[webhook] Body:`, req.body);
+    console.log(`[webhook] Files:`, req.files ? req.files.length : 0);
 
-    const id = uuidv4();
+    // Use the pre-generated ID (from multipart) or create a new one
+    const id = req._submissionId || uuidv4();
     const received_at = new Date().toISOString();
 
     // Grab the client IP (works behind proxies like Railway)
@@ -129,6 +161,33 @@ app.post("/webhook", parseMultipart, authenticateWebhook, (req, res) => {
 
     // All body fields are stored dynamically as JSON — no hardcoded field names
     const fields = req.body && typeof req.body === "object" ? req.body : {};
+
+    // If files were uploaded, add them to the fields object
+    if (req.files && req.files.length > 0) {
+      const fileEntries = req.files.map((f) => ({
+        fieldName: f.fieldname,
+        originalName: f.originalname,
+        mimeType: f.mimetype,
+        size: f.size,
+        url: `/uploads/${id}/${f.filename}`,
+      }));
+
+      // Add each file under its field name
+      for (const file of fileEntries) {
+        const key = file.fieldName || "file";
+        // If there's already a file entry for this field, make it an array
+        if (fields[`__file_${key}`]) {
+          if (!Array.isArray(fields[`__file_${key}`])) {
+            fields[`__file_${key}`] = [fields[`__file_${key}`]];
+          }
+          fields[`__file_${key}`].push(file);
+        } else {
+          fields[`__file_${key}`] = file;
+        }
+      }
+
+      console.log(`[webhook] ${fileEntries.length} file(s) saved to uploads/${id}/`);
+    }
 
     db.run(
       `INSERT INTO submissions (id, received_at, source_ip, fields) VALUES (?, ?, ?, ?)`,
@@ -197,6 +256,13 @@ app.delete("/api/submissions/:id", (req, res) => {
 
     db.run(`DELETE FROM submissions WHERE id = ?`, [req.params.id]);
     saveDb();
+
+    // Also delete uploaded files for this submission
+    const uploadDir = path.join(UPLOADS_DIR, req.params.id);
+    if (fs.existsSync(uploadDir)) {
+      fs.rmSync(uploadDir, { recursive: true, force: true });
+      console.log(`[api] Deleted upload folder: ${uploadDir}`);
+    }
 
     console.log(`[api] Submission ${req.params.id} deleted`);
     return res.json({ success: true });
