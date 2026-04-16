@@ -1,20 +1,19 @@
 // =============================================================================
 // Framer Form Webhook Receiver — server.js
 // A Node.js/Express server that receives Framer form submissions via webhook,
-// stores them in SQLite, and serves a dashboard UI.
-// Files are uploaded to Cloudflare R2 for persistent storage.
+// stores them in SQLite, emails each submission via Gmail, and serves a dashboard.
 // =============================================================================
 
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
+const nodemailer = require("nodemailer");
 const initSqlJs = require("sql.js");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const fs = require("fs");
-const { S3Client, PutObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, GetObjectCommand } = require("@aws-sdk/client-s3");
 
-// Multer setup — store files in memory (then upload to R2)
+// Multer setup — store files in memory (for email attachments)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB per file
@@ -26,68 +25,110 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || null;
 const DB_PATH = path.join(__dirname, "submissions.db");
 
 // ---------------------------------------------------------------------------
-// Cloudflare R2 Setup
+// Gmail Setup
 // ---------------------------------------------------------------------------
 
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || "";
-const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || "framer-form-uploads";
+const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || GMAIL_USER; // Where to send notifications (defaults to same account)
 
-// Only create S3 client if R2 credentials are configured
-let s3 = null;
-if (R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_ACCOUNT_ID) {
-  s3 = new S3Client({
-    region: "auto",
-    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: R2_ACCESS_KEY_ID,
-      secretAccessKey: R2_SECRET_ACCESS_KEY,
+let mailTransport = null;
+if (GMAIL_USER && GMAIL_APP_PASSWORD) {
+  mailTransport = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: GMAIL_USER,
+      pass: GMAIL_APP_PASSWORD,
     },
-    forcePathStyle: true,
-    tls: true,
   });
-  console.log("[r2] Cloudflare R2 configured for file uploads");
+  console.log(`[mail] Gmail configured — notifications will be sent to ${NOTIFY_EMAIL}`);
 } else {
-  console.log("[r2] R2 not configured — file uploads will be stored locally (not persistent on Render)");
+  console.log("[mail] Gmail not configured — email notifications disabled");
 }
 
-// Upload a file buffer to R2, returns the public key/path
-async function uploadToR2(submissionId, filename, buffer, mimeType) {
-  const key = `${submissionId}/${filename}`;
-  await s3.send(new PutObjectCommand({
-    Bucket: R2_BUCKET_NAME,
-    Key: key,
-    Body: buffer,
-    ContentType: mimeType,
-  }));
-  return key;
-}
+// Send submission email with all fields and file attachments
+async function sendSubmissionEmail(id, fields, files, received_at) {
+  if (!mailTransport) return;
 
-// Delete all files for a submission from R2
-async function deleteFromR2(submissionId) {
   try {
-    // List all objects with this submission prefix
-    const listed = await s3.send(new ListObjectsV2Command({
-      Bucket: R2_BUCKET_NAME,
-      Prefix: `${submissionId}/`,
+    // Build a readable subject from the first recognizable fields
+    const name = fields.name || fields.Name || fields.fullName || fields.full_name || "";
+    const email = fields.email || fields.Email || "";
+    const subjectParts = [name, email].filter(Boolean).join(" — ");
+    const subject = subjectParts
+      ? `New Submission: ${subjectParts}`
+      : `New Form Submission — ${new Date(received_at).toLocaleString()}`;
+
+    // Build HTML email body with all fields
+    const fieldRows = Object.entries(fields)
+      .filter(([key]) => !key.startsWith("__file_")) // Skip file metadata in body
+      .map(([key, val]) => {
+        const value = typeof val === "object" ? JSON.stringify(val) : String(val);
+        return `
+          <tr>
+            <td style="padding:10px 16px;font-weight:600;color:#555;background:#f8f8f6;border-bottom:1px solid #e4e4e0;text-transform:uppercase;font-size:12px;letter-spacing:0.5px;vertical-align:top;width:160px;">${key}</td>
+            <td style="padding:10px 16px;color:#1a1a1a;border-bottom:1px solid #e4e4e0;font-size:14px;">${value}</td>
+          </tr>`;
+      })
+      .join("");
+
+    // List attached files in the email
+    const fileList = (files || []).map(f =>
+      `<li style="margin:4px 0;font-size:13px;">📎 ${f.originalname} (${formatFileSize(f.size)})</li>`
+    ).join("");
+
+    const html = `
+      <div style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;">
+        <div style="background:#1a1a1a;color:#fff;padding:16px 24px;border-radius:10px 10px 0 0;">
+          <h2 style="margin:0;font-size:16px;font-weight:600;">Form Inbox</h2>
+          <p style="margin:4px 0 0;font-size:12px;opacity:0.7;">Submission ${id}</p>
+        </div>
+        <div style="padding:0;border:1px solid #e4e4e0;border-top:none;border-radius:0 0 10px 10px;">
+          <table style="width:100%;border-collapse:collapse;">
+            <tr>
+              <td style="padding:10px 16px;font-weight:600;color:#555;background:#f8f8f6;border-bottom:1px solid #e4e4e0;text-transform:uppercase;font-size:12px;letter-spacing:0.5px;width:160px;">Received</td>
+              <td style="padding:10px 16px;color:#1a1a1a;border-bottom:1px solid #e4e4e0;font-size:14px;">${new Date(received_at).toLocaleString()}</td>
+            </tr>
+            ${fieldRows}
+          </table>
+          ${fileList ? `<div style="padding:12px 16px;border-top:1px solid #e4e4e0;"><p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#555;text-transform:uppercase;">Attachments</p><ul style="margin:0;padding-left:20px;">${fileList}</ul></div>` : ""}
+        </div>
+        <p style="text-align:center;font-size:11px;color:#999;margin-top:16px;">Sent by Form Inbox Webhook Receiver</p>
+      </div>
+    `;
+
+    // Prepare file attachments
+    const attachments = (files || []).map(f => ({
+      filename: f.originalname,
+      content: f.buffer,
+      contentType: f.mimetype,
     }));
 
-    if (listed.Contents && listed.Contents.length > 0) {
-      await s3.send(new DeleteObjectsCommand({
-        Bucket: R2_BUCKET_NAME,
-        Delete: {
-          Objects: listed.Contents.map(obj => ({ Key: obj.Key })),
-        },
-      }));
-      console.log(`[r2] Deleted ${listed.Contents.length} file(s) for submission ${submissionId}`);
-    }
+    await mailTransport.sendMail({
+      from: `Form Inbox <${GMAIL_USER}>`,
+      to: NOTIFY_EMAIL,
+      subject,
+      html,
+      attachments,
+    });
+
+    console.log(`[mail] Notification sent for submission ${id}`);
   } catch (err) {
-    console.error(`[r2] Error deleting files for ${submissionId}:`, err.message);
+    console.error(`[mail] Failed to send email for ${id}:`, err.message);
+    // Don't throw — email failure should never break the submission
   }
 }
 
-// Local uploads fallback (when R2 is not configured)
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+// ---------------------------------------------------------------------------
+// Local uploads fallback
+// ---------------------------------------------------------------------------
+
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -97,28 +138,20 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // Middleware
 // ---------------------------------------------------------------------------
 
-// Enable CORS for all origins (Framer sites can POST from any domain)
 app.use(cors());
-
-// Parse JSON and URL-encoded bodies (Framer may send various formats)
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(express.text({ limit: "1mb", type: "text/*" }));
 app.use(express.raw({ limit: "1mb", type: "application/octet-stream" }));
-
-// Serve static files from the public directory
 app.use(express.static(path.join(__dirname, "public")));
-
-// Serve local uploads (fallback when R2 is not configured)
 app.use("/uploads", express.static(UPLOADS_DIR));
 
 // ---------------------------------------------------------------------------
-// Database Setup (sql.js — pure JS SQLite, no native compilation needed)
+// Database Setup
 // ---------------------------------------------------------------------------
 
-let db; // Will be initialized before server starts
+let db;
 
-// Save the database to disk (called after every write operation)
 function saveDb() {
   const data = db.export();
   const buffer = Buffer.from(data);
@@ -127,16 +160,12 @@ function saveDb() {
 
 async function initDb() {
   const SQL = await initSqlJs();
-
-  // Load existing database from disk if it exists
   if (fs.existsSync(DB_PATH)) {
     const fileBuffer = fs.readFileSync(DB_PATH);
     db = new SQL.Database(fileBuffer);
   } else {
     db = new SQL.Database();
   }
-
-  // Create the submissions table if it doesn't exist
   db.run(`
     CREATE TABLE IF NOT EXISTS submissions (
       id TEXT PRIMARY KEY,
@@ -149,13 +178,11 @@ async function initDb() {
 }
 
 // ---------------------------------------------------------------------------
-// Webhook Authentication Middleware
+// Webhook Authentication
 // ---------------------------------------------------------------------------
 
 function authenticateWebhook(req, res, next) {
-  // If no secret is configured, skip authentication (easy local testing)
   if (!WEBHOOK_SECRET) return next();
-
   const token = req.headers["x-webhook-token"];
   if (!token || token !== WEBHOOK_SECRET) {
     return res.status(401).json({
@@ -170,15 +197,12 @@ function authenticateWebhook(req, res, next) {
 // Routes
 // ---------------------------------------------------------------------------
 
-// Middleware: try parsing multipart/form-data, but don't fail on other types
 function parseMultipart(req, res, next) {
   const contentType = req.headers["content-type"] || "";
   if (contentType.includes("multipart/form-data")) {
     req._submissionId = uuidv4();
     upload.any()(req, res, (err) => {
-      if (err) {
-        console.error("[webhook] Multer error:", err.message);
-      }
+      if (err) console.error("[webhook] Multer error:", err.message);
       next();
     });
   } else {
@@ -186,7 +210,7 @@ function parseMultipart(req, res, next) {
   }
 }
 
-// POST /webhook — Receive and store a form submission
+// POST /webhook — Receive and store a form submission + send email
 app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
   try {
     console.log(`[webhook] Content-Type: ${req.headers["content-type"]}`);
@@ -203,26 +227,23 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
 
     const fields = req.body && typeof req.body === "object" ? req.body : {};
 
-    // Handle file uploads — never let file upload failure break the submission
-    if (req.files && req.files.length > 0) {
-      for (const file of req.files) {
+    // Keep a reference to raw files for email attachments
+    const rawFiles = req.files || [];
+
+    // Handle file uploads to local storage
+    if (rawFiles.length > 0) {
+      for (const file of rawFiles) {
         const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
         const filename = `${Date.now()}-${safeName}`;
         let fileUrl = null;
 
         try {
-          if (s3) {
-            const key = await uploadToR2(id, filename, file.buffer, file.mimetype);
-            fileUrl = `/api/files/${key}`;
-          } else {
-            const subDir = path.join(UPLOADS_DIR, id);
-            if (!fs.existsSync(subDir)) fs.mkdirSync(subDir, { recursive: true });
-            fs.writeFileSync(path.join(subDir, filename), file.buffer);
-            fileUrl = `/uploads/${id}/${filename}`;
-          }
+          const subDir = path.join(UPLOADS_DIR, id);
+          if (!fs.existsSync(subDir)) fs.mkdirSync(subDir, { recursive: true });
+          fs.writeFileSync(path.join(subDir, filename), file.buffer);
+          fileUrl = `/uploads/${id}/${filename}`;
         } catch (uploadErr) {
-          console.error(`[webhook] File upload failed for ${file.originalname}:`, uploadErr.message);
-          fileUrl = null; // Mark as failed but continue
+          console.error(`[webhook] File save failed for ${file.originalname}:`, uploadErr.message);
         }
 
         const fileEntry = {
@@ -241,9 +262,10 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
           fields[key] = fileEntry;
         }
       }
-      console.log(`[webhook] ${req.files.length} file(s) processed ${s3 ? "(R2)" : "(local)"}`);
+      console.log(`[webhook] ${rawFiles.length} file(s) saved locally`);
     }
 
+    // Save to database
     db.run(
       `INSERT INTO submissions (id, received_at, source_ip, fields) VALUES (?, ?, ?, ?)`,
       [id, received_at, source_ip, JSON.stringify(fields)]
@@ -251,34 +273,14 @@ app.post("/webhook", parseMultipart, authenticateWebhook, async (req, res) => {
     saveDb();
 
     console.log(`[webhook] Submission ${id} stored (${Object.keys(fields).length} fields)`);
+
+    // Send email notification (non-blocking — don't wait for it)
+    sendSubmissionEmail(id, fields, rawFiles, received_at);
+
     return res.status(200).json({ success: true, id });
   } catch (err) {
     console.error("[webhook] Error storing submission:", err.message);
     return res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
-
-// GET /api/files/:submissionId/:filename — Serve files from R2
-app.get("/api/files/:submissionId/:filename", async (req, res) => {
-  if (!s3) {
-    return res.status(404).json({ error: "R2 not configured" });
-  }
-  try {
-    const key = `${req.params.submissionId}/${req.params.filename}`;
-    const response = await s3.send(new GetObjectCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-    }));
-
-    // Set content type and disposition for download
-    res.set("Content-Type", response.ContentType || "application/octet-stream");
-    res.set("Content-Disposition", `inline; filename="${req.params.filename}"`);
-
-    // Stream the file to the response
-    response.Body.pipe(res);
-  } catch (err) {
-    console.error("[api] Error fetching file from R2:", err.message);
-    return res.status(404).json({ error: "File not found" });
   }
 });
 
@@ -335,13 +337,9 @@ app.delete("/api/submissions/:id", async (req, res) => {
     saveDb();
 
     // Delete uploaded files
-    if (s3) {
-      await deleteFromR2(req.params.id);
-    } else {
-      const uploadDir = path.join(UPLOADS_DIR, req.params.id);
-      if (fs.existsSync(uploadDir)) {
-        fs.rmSync(uploadDir, { recursive: true, force: true });
-      }
+    const uploadDir = path.join(UPLOADS_DIR, req.params.id);
+    if (fs.existsSync(uploadDir)) {
+      fs.rmSync(uploadDir, { recursive: true, force: true });
     }
 
     console.log(`[api] Submission ${req.params.id} deleted`);
@@ -353,7 +351,7 @@ app.delete("/api/submissions/:id", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Catch-all: serve the dashboard for any non-API route
+// Catch-all: serve the dashboard
 // ---------------------------------------------------------------------------
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -367,11 +365,11 @@ initDb().then(() => {
   app.listen(PORT, () => {
     console.log(`\n  ✦ Form Inbox running at http://localhost:${PORT}`);
     console.log(`  ✦ Webhook endpoint:     http://localhost:${PORT}/webhook`);
-    console.log(`  ✦ File storage:         ${s3 ? "Cloudflare R2" : "Local (not persistent)"}`);
+    console.log(`  ✦ Email notifications:  ${mailTransport ? "enabled" : "disabled"}`);
     if (WEBHOOK_SECRET) {
-      console.log(`  ✦ Webhook auth:         enabled (X-Webhook-Token required)`);
+      console.log(`  ✦ Webhook auth:         enabled`);
     } else {
-      console.log(`  ✦ Webhook auth:         disabled (set WEBHOOK_SECRET to enable)`);
+      console.log(`  ✦ Webhook auth:         disabled`);
     }
     console.log();
   });
