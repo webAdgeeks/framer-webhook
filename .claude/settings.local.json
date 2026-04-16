@@ -16,7 +16,9 @@
       "Bash(node server.js)",
       "Bash(curl -s -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d '{\"name\":\"John Doe\",\"email\":\"john@example.com\",\"message\":\"Hello from Framer!\"}')",
       "Bash(curl -s http://localhost:3000/api/submissions)",
-      "Bash(gh --version)"
+      "Bash(gh --version)",
+      "mcp__d3039a8f-976b-427e-8edc-0e1525a34f37__accounts_list",
+      "mcp__d3039a8f-976b-427e-8edc-0e1525a34f37__r2_bucket_create"
     ]
   }
 }
